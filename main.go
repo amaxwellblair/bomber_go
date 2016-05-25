@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/mux"
 
@@ -10,7 +11,8 @@ import (
 )
 
 type handler struct {
-	connections []*websocket.Conn
+	mu   sync.Mutex
+	room map[string][]*websocket.Conn
 }
 
 type commands struct {
@@ -22,11 +24,17 @@ type commands struct {
 }
 
 func newHandler() *handler {
-	return &handler{}
+	return &handler{
+		room: make(map[string][]*websocket.Conn),
+	}
 }
 
 func (h *handler) socket(ws *websocket.Conn) {
-	h.connections = append(h.connections, ws)
+	url := ws.Config().Location.String()
+	h.mu.Lock()
+	h.room[url] = append(h.room[url], ws)
+	h.mu.Unlock()
+
 	for {
 		var c commands
 		if err := websocket.JSON.Receive(ws, &c); err != nil {
@@ -34,13 +42,17 @@ func (h *handler) socket(ws *websocket.Conn) {
 			break
 		}
 
-		h.sendCommands(&c)
+		h.sendCommands(&c, url)
 		fmt.Println("Received commands:", c)
 	}
 }
 
-func (h *handler) sendCommands(c *commands) {
-	for _, conn := range h.connections {
+func (h *handler) sendCommands(c *commands, url string) {
+	h.mu.Lock()
+	connections := h.room[url]
+	h.mu.Unlock()
+
+	for _, conn := range connections {
 		if err := websocket.JSON.Send(conn, c); err != nil {
 			fmt.Println(err)
 		}
@@ -49,7 +61,7 @@ func (h *handler) sendCommands(c *commands) {
 
 func (h *handler) newRouter() *mux.Router {
 	r := mux.NewRouter()
-	r.Handle("/socket", websocket.Handler(h.socket))
+	r.Handle("/socket/{id}", websocket.Handler(h.socket))
 	return r
 }
 
